@@ -1,0 +1,5 @@
+helper/.venv/
+helper/bin/
+helper/cookies_*.txt
+__pycache__/
+*.pyc
