@@ -41,7 +41,7 @@ YouTube page ──click──> Extension ──> Helper (127.0.0.1:9477) ──
 ### Step 1: Get the project
 
 ```
-git clone https://github.com/<your-username>/<your-repo>.git
+git clone https://github.com/protwoy007/youtub_downloader.git
 ```
 
 Or click **Code → Download ZIP** and extract it. You get two folders: `extension/` and `helper/`.
@@ -144,7 +144,3 @@ For **personal use** only. Downloading videos may violate YouTube's Terms of Ser
 ## Credits
 
 [yt-dlp](https://github.com/yt-dlp/yt-dlp) · [FFmpeg](https://ffmpeg.org/) (builds from [yt-dlp/FFmpeg-Builds](https://github.com/yt-dlp/FFmpeg-Builds)) · [Deno](https://deno.com/)
-
-## License
-
-Add your preferred license here (for example MIT).
