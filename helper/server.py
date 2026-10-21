@@ -1,4 +1,4 @@
-import io, json, os, threading, time, urllib.request, uuid, zipfile
+import io, json, os, platform, shutil, tarfile, threading, time, urllib.request, uuid, zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -6,8 +6,23 @@ HERE = Path(__file__).parent.resolve()
 BIN = HERE / "bin"
 OUT = Path.home() / "Downloads" / "YouTube Downloads"
 PORT = 9477
-FFMPEG_URL = "https://github.com/yt-dlp/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip"
-DENO_URL = "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip"
+
+SYSTEM = platform.system()            # Windows / Linux / Darwin
+IS_WIN = SYSTEM == "Windows"
+EXE = ".exe" if IS_WIN else ""
+ARM = platform.machine().lower() in ("aarch64", "arm64")
+
+FF_BASE = "https://github.com/yt-dlp/FFmpeg-Builds/releases/latest/download/"
+DENO_BASE = "https://github.com/denoland/deno/releases/latest/download/"
+if IS_WIN:
+    FFMPEG_URL = FF_BASE + "ffmpeg-master-latest-win64-gpl.zip"
+    DENO_URL = DENO_BASE + "deno-x86_64-pc-windows-msvc.zip"
+elif SYSTEM == "Linux":
+    FFMPEG_URL = FF_BASE + ("ffmpeg-master-latest-linuxarm64-gpl.tar.xz" if ARM else "ffmpeg-master-latest-linux64-gpl.tar.xz")
+    DENO_URL = DENO_BASE + ("deno-aarch64-unknown-linux-gnu.zip" if ARM else "deno-x86_64-unknown-linux-gnu.zip")
+else:  # macOS: install ffmpeg with `brew install ffmpeg`
+    FFMPEG_URL = None
+    DENO_URL = DENO_BASE + ("deno-aarch64-apple-darwin.zip" if ARM else "deno-x86_64-apple-darwin.zip")
 
 BIN.mkdir(exist_ok=True)
 OUT.mkdir(parents=True, exist_ok=True)
@@ -16,24 +31,43 @@ ready = threading.Event()
 jobs = {}
 
 
-def fetch_zip(url, wanted):
+def fetch_archive(url, wanted):
+    """Download a .zip or .tar.xz and extract only the wanted file names into BIN."""
     print(f"Downloading {url} ...")
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     data = urllib.request.urlopen(req).read()
-    with zipfile.ZipFile(io.BytesIO(data)) as z:
-        for name in z.namelist():
-            base = name.rsplit("/", 1)[-1]
-            if base in wanted:
-                (BIN / base).write_bytes(z.read(name))
+    if url.endswith(".zip"):
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            for name in z.namelist():
+                base = name.rsplit("/", 1)[-1]
+                if base in wanted:
+                    (BIN / base).write_bytes(z.read(name))
+    else:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:xz") as t:
+            for m in t.getmembers():
+                base = m.name.rsplit("/", 1)[-1]
+                if m.isfile() and base in wanted:
+                    (BIN / base).write_bytes(t.extractfile(m).read())
+    for w in wanted:
+        f = BIN / w
+        if f.exists():
+            f.chmod(0o755)
+
+
+def have(tool):
+    return (BIN / (tool + EXE)).exists() or shutil.which(tool)
 
 
 def setup_tools():
-    # Fallback: start.bat normally installs these already
+    # Fallback: start.bat / start.sh normally set these up already
     try:
-        if not (BIN / "ffmpeg.exe").exists():
-            fetch_zip(FFMPEG_URL, {"ffmpeg.exe", "ffprobe.exe"})
-        if not (BIN / "deno.exe").exists():
-            fetch_zip(DENO_URL, {"deno.exe"})
+        if not (have("ffmpeg") and have("ffprobe")):
+            if FFMPEG_URL:
+                fetch_archive(FFMPEG_URL, {"ffmpeg" + EXE, "ffprobe" + EXE})
+            else:
+                print("ffmpeg not found. Install it with: brew install ffmpeg")
+        if not have("deno"):
+            fetch_archive(DENO_URL, {"deno" + EXE})
         print("Tools ready.")
     except Exception as e:
         print("Tool setup failed:", e)
@@ -75,10 +109,12 @@ def run_job(jid, url, mode, height, cookies=None):
         "outtmpl": str(OUT / "%(title)s.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
-        "ffmpeg_location": str(BIN),
         "progress_hooks": [hook],
-        "windowsfilenames": True,
     }
+    if (BIN / ("ffmpeg" + EXE)).exists():
+        opts["ffmpeg_location"] = str(BIN)
+    if IS_WIN:
+        opts["windowsfilenames"] = True
     if mode == "audio":
         opts.update(
             format="bestaudio/best",
@@ -113,9 +149,9 @@ def run_job(jid, url, mode, height, cookies=None):
 
     # JS runtime for YouTube's challenge solving. Without it only a 360p format
     # is exposed. Point yt-dlp straight at the bundled deno.
-    deno = BIN / "deno.exe"
-    if deno.exists():
-        opts["js_runtimes"] = {"deno": {"path": str(deno)}}
+    deno = shutil.which("deno")
+    if deno:
+        opts["js_runtimes"] = {"deno": {"path": deno}}
     opts["remote_components"] = ["ejs:github"]
 
     def classify(err):
@@ -184,7 +220,7 @@ def run_job(jid, url, mode, height, cookies=None):
     elif "reload" in errors:
         msg = "YouTube rejected the login cookies. Reload the YouTube page, then try again."
     else:
-        msg = "Download failed. Run helper\\start.bat to update yt-dlp, then try again."
+        msg = "Download failed. Run start.bat (Windows) or start.sh (Linux) to update yt-dlp, then try again."
     print("FAILED:", msg)
     job.update(state="error", error=msg)
 
