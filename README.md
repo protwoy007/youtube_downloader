@@ -1,4 +1,4 @@
-# YT Local Downloader
+# YT Local Downloader For LaL Vai
 
 A browser extension for **Brave, Chrome and Edge** that adds a **Download** button next to the Subscribe button on YouTube. Click it, pick a quality (or MP3 audio), and the file is saved to your computer. If the helper isn't running, the button starts it for you.
 
