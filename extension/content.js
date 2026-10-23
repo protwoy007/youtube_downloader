@@ -1,6 +1,15 @@
 const ID = "ytdl-wrap";
-const send = (msg) => chrome.runtime.sendMessage(msg);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Safe wrapper: returns {invalid:true} if the extension was reloaded and this page is stale
+async function send(msg) {
+  try {
+    if (!chrome.runtime?.id) return { ok: false, invalid: true };
+    return (await chrome.runtime.sendMessage(msg)) || { ok: false };
+  } catch (e) {
+    return { ok: false, invalid: true };
+  }
+}
 
 function videoUrl() {
   const v = new URL(location.href).searchParams.get("v");
@@ -24,7 +33,6 @@ function build() {
     <button id="ytdl-btn">⬇ Download</button>
     <div id="ytdl-menu">
       <div class="h">VIDEO</div>
-      <div class="i" data-m="video" data-h="1440">1440p</div>
       <div class="i" data-m="video" data-h="1080">1080p</div>
       <div class="i" data-m="video" data-h="720">720p</div>
       <div class="i" data-m="video" data-h="480">480p</div>
@@ -36,33 +44,46 @@ function build() {
   const btn = wrap.querySelector("#ytdl-btn");
   const menu = wrap.querySelector("#ytdl-menu");
   let busy = false;
+  let waiting = false;
 
+  const IDLE = "⬇ Download";
   function reset(ms) {
-    setTimeout(() => { busy = false; btn.textContent = "⬇ Download"; }, ms);
+    setTimeout(() => { busy = false; btn.textContent = IDLE; }, ms);
   }
 
+  // returns "ok" | "invalid" | "timeout" | "cancel"
   async function ensureHelper() {
-    const r = await send({ type: "ping" });
-    if (r.ok) return true;
-    btn.textContent = "Starting helper…";
+    let r = await send({ type: "ping" });
+    if (r.invalid) return "invalid";
+    if (r.ok) return "ok";
+    btn.textContent = "Starting helper… (click to cancel)";
     launchHelper();
-    for (let i = 0; i < 900; i++) { // up to 15 min (first-time setup downloads tools)
+    waiting = true;
+    for (let i = 0; i < 120; i++) { // wait up to 2 min
       await sleep(1000);
-      if ((await send({ type: "ping" })).ok) return true;
-      if (i === 15) btn.textContent = "Setting up… see helper window";
+      if (!waiting) return "cancel";
+      r = await send({ type: "ping" });
+      if (r.ok) { waiting = false; return "ok"; }
+      if (i === 10) btn.textContent = "Waiting for helper window… (click to cancel)";
     }
-    return false;
+    waiting = false;
+    return "timeout";
   }
 
   btn.onclick = async (e) => {
     e.stopPropagation();
+    if (waiting) { // cancel waiting
+      waiting = false; busy = false; btn.textContent = IDLE; return;
+    }
     if (busy) return;
     if (menu.classList.contains("open")) return menu.classList.remove("open");
     busy = true;
-    const ok = await ensureHelper();
-    if (!ok) { btn.textContent = "Helper not ready"; return reset(4000); }
+    const res = await ensureHelper();
+    if (res === "cancel") return;
+    if (res === "invalid") { btn.textContent = "Refresh the page (Ctrl+F5)"; return reset(5000); }
+    if (res === "timeout") { btn.textContent = "Helper not ready – click to retry"; return reset(4000); }
     busy = false;
-    btn.textContent = "⬇ Download";
+    btn.textContent = IDLE;
     menu.classList.add("open");
   };
 
@@ -74,6 +95,7 @@ function build() {
       busy = true;
       btn.textContent = "Starting…";
       const r = await send({ type: "start", url, mode: el.dataset.m, height: +el.dataset.h });
+      if (r.invalid) { btn.textContent = "Refresh the page (Ctrl+F5)"; return reset(5000); }
       if (!r.ok) { btn.textContent = "Helper offline"; return reset(4000); }
       poll(r.id);
     };

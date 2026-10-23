@@ -3,3 +3,4 @@ helper/bin/
 helper/cookies_*.txt
 __pycache__/
 *.pyc
+helper/start.log
