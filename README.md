@@ -177,6 +177,3 @@ For **personal use** only. Downloading videos may violate YouTube's Terms of Ser
 
 [yt-dlp](https://github.com/yt-dlp/yt-dlp) · [FFmpeg](https://ffmpeg.org/) (builds from [yt-dlp/FFmpeg-Builds](https://github.com/yt-dlp/FFmpeg-Builds)) · [Deno](https://deno.com/)
 
-## License
-
-Add your preferred license here (for example MIT).
