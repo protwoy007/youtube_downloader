@@ -48,7 +48,7 @@ function build() {
 
   const IDLE = "⬇ Download";
   function reset(ms) {
-    setTimeout(() => { busy = false; btn.textContent = IDLE; }, ms);
+    setTimeout(() => { busy = false; btn.textContent = IDLE; btn.title = ""; }, ms);
   }
 
   // returns "ok" | "invalid" | "timeout" | "cancel"
@@ -104,11 +104,16 @@ function build() {
   async function poll(id) {
     const r = await send({ type: "status", id });
     if (!r.ok) { btn.textContent = "Helper offline"; return reset(3000); }
-    if (r.state === "preparing") btn.textContent = "Setting up (first time)…";
+    if (r.state === "preparing") btn.textContent = r.note || "Setting up (first time)…";
     else if (r.state === "downloading") btn.textContent = `Downloading ${r.percent}%`;
     else if (r.state === "processing") btn.textContent = "Processing…";
     else if (r.state === "done") { btn.textContent = "✓ Saved"; return reset(3000); }
-    else if (r.state === "error") { btn.textContent = "Failed"; console.error("[ytdl]", r.error); return reset(4000); }
+    else if (r.state === "error") {
+      btn.textContent = r.short || "Failed";
+      btn.title = r.error || "";
+      console.error("[ytdl]", r.error);
+      return reset(8000);
+    }
     setTimeout(() => poll(id), 700);
   }
   return wrap;

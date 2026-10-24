@@ -1,3 +1,5 @@
+<p align="center"><img src="extension/icons/icon128.png" width="96" alt="YT Local Downloader logo"></p>
+
 # YT Local Downloader For LaL Vai
 
 A browser extension for **Brave, Chrome and Edge** that adds a **Download** button next to the Subscribe button on YouTube. Click it, pick a quality (or MP3 audio), and the file is saved to your computer. If the helper isn't running, the button starts it for you.
@@ -15,6 +17,9 @@ Under the hood, the extension talks to a small helper program on your own PC (`1
 - Live progress on the button (`Downloading 42%`, `Processing…`, `✓ Saved`)
 - **Click the button and the helper starts automatically** if it is not running (via a `ytdl://` link)
 - **Smart retries:** if YouTube only offers low quality or blocks a request, the helper automatically tries other YouTube clients before giving up
+- **Clear error messages** on the button (for example `429: wait 30-60 min`); hover over it for the full explanation
+- **Auto-update:** if a download fails for an unclear reason, the helper updates yt-dlp and retries once on its own
+- **Clean logs:** the helper window shows short, readable status lines instead of yt-dlp's warning noise
 - `start.bat` / `start.sh` check every requirement and only install what is missing
 - Files saved to `Downloads/YouTube Downloads`
 
@@ -38,7 +43,18 @@ YouTube limits which clients can get high quality, and some accounts only get 36
 3. `tv_simply` / `web_safari` clients, with your cookies
 4. Default clients, with your cookies (last resort, accepts any quality)
 
-Without cookies, only attempt 1 and a default-client fallback are used. The helper window prints each attempt (`Attempt 1/4: …`). The yt-dlp **warnings** between attempts are normal: they only explain why an attempt was skipped. As long as a later attempt reports the quality you want, the download is fine.
+Without cookies, only attempt 1 and a default-client fallback are used. The helper window prints one short line per step, and yt-dlp's own warnings are hidden:
+
+```
+[14:02:11] Request: 1080p (u0YiWpNOHFs)
+[14:02:11] Method 1/4: android_vr (no cookies)
+[14:02:13]   only 360p offered, trying next method
+[14:02:16] Method 2/4: tv (cookies)
+[14:02:18]   1080p offered, downloading
+[14:03:02] Saved: <video title>
+```
+
+If a download fails for an unclear reason (not a block, login or network problem), the helper **updates yt-dlp with pip and retries once**. It checks for updates at most once per hour.
 
 ## Requirements
 
@@ -123,7 +139,7 @@ bash helper/start.sh
 
 ## Updating yt-dlp
 
-YouTube changes often. If downloads start failing, update yt-dlp.
+YouTube changes often. The helper already updates yt-dlp by itself when a download fails for an unclear reason. You can also update it manually:
 
 - **Windows:** from a Command Prompt in the project folder:
   ```
@@ -141,9 +157,26 @@ YouTube changes often. If downloads start failing, update yt-dlp.
 | **429 Too Many Requests** or **"Sign in to confirm you're not a bot"** | YouTube is limiting your IP or session. Stop retrying, wait 30–60 minutes, reload the YouTube tab (logged in), reload the extension, then try once. |
 | Only **360p** or **720p** is downloaded | Some accounts only get low quality from YouTube's default clients. The helper already tries other clients (see above). Run `start.bat update` and try again. |
 | Button does not appear | Refresh the page and make sure the extension is enabled. YouTube may have changed its layout; the selector in `extension/content.js` (`ytd-watch-metadata #owner`) may need updating. |
-| **"Failed"** | Read the message in the helper window, run `start.bat update`, and check the browser console (F12, filter `[ytdl]`). |
+| **"Failed - see helper window"** | Read the last lines in the helper window, run `start.bat update`, and check the browser console (F12, filter `[ytdl]`). |
 | ffmpeg or deno download failed | Check your internet, delete partial files in `helper\bin`, run `start.bat` again. |
 | Port 9477 already in use | Another copy of the helper is running; close it. |
+
+### Messages on the button
+
+When a download fails, the button shows the reason for a few seconds. Hover over it for the full explanation.
+
+| Button says | Meaning | What to do |
+|-------------|---------|------------|
+| `429: wait 30-60 min` | YouTube is rate-limiting your IP | Wait, then try once |
+| `Bot check: reload YouTube` | YouTube wants proof you're not a bot | Log in, reload the tab and the extension |
+| `Cookies expired: reload page` | YouTube rejected the login cookies | Reload the YouTube tab |
+| `Private video` / `Members-only video` / `Age-restricted: log in` | The video needs a logged-in account | Log in with an account that can watch it |
+| `Blocked in your country` / `Video unavailable` | YouTube won't serve this video to you | Nothing to fix on your side |
+| `Live stream: not supported` | Live or upcoming video | Try again after it ends |
+| `No internet connection` | YouTube could not be reached | Check your connection |
+| `ffmpeg missing` | ffmpeg/ffprobe not found | Delete `helper\bin`, run `start.bat` again |
+| `Quality not available` | That quality doesn't exist for this video | Pick another quality |
+| `Failed - see helper window` | Unknown reason | Read the helper window, run `start.bat update` |
 
 ## Security and privacy
 
@@ -159,14 +192,16 @@ YouTube changes often. If downloads start failing, update yt-dlp.
 
 ```
 extension/
-  manifest.json    Manifest V3, permissions
+  manifest.json    Manifest V3, permissions, icons
+  icons/           Extension icons (16, 32, 48, 128 px)
   content.js       Button, menu, helper auto-start, progress
   content.css      Styling (light and dark)
   background.js    Talks to the helper, attaches YouTube cookies
 helper/
   start.bat        Windows: checks requirements, installs what's missing, registers ytdl://, starts the helper
   start.sh         Linux/macOS: same job, installs/updates yt-dlp every run
-  server.py        Local server wrapping yt-dlp and ffmpeg, with client retries
+  server.py        Local server wrapping yt-dlp and ffmpeg: client retries, error messages, auto-update
+LICENSE            MIT license
 ```
 
 ## Disclaimer
@@ -177,3 +212,8 @@ For **personal use** only. Downloading videos may violate YouTube's Terms of Ser
 
 [yt-dlp](https://github.com/yt-dlp/yt-dlp) · [FFmpeg](https://ffmpeg.org/) (builds from [yt-dlp/FFmpeg-Builds](https://github.com/yt-dlp/FFmpeg-Builds)) · [Deno](https://deno.com/)
 
+## License
+
+[MIT](LICENSE) © protwoy007.
+
+The tools the helper downloads keep their own licenses: yt-dlp (Unlicense), FFmpeg builds (GPL, downloaded separately and not bundled in this repository) and Deno (MIT).

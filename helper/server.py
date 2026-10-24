@@ -1,6 +1,19 @@
-import io, json, os, platform, shutil, tarfile, threading, time, urllib.request, uuid, zipfile
+import importlib, io, json, os, platform, re, shutil, subprocess, sys, tarfile, threading, time, urllib.request, uuid, zipfile
+from importlib import metadata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+# Titles can contain any language; never crash on a console that can't print them
+for _st in (sys.stdout, sys.stderr):
+    try:
+        _st.reconfigure(errors="replace")
+    except Exception:
+        pass
+
+
+def log(msg):
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
 
 HERE = Path(__file__).parent.resolve()
 BIN = HERE / "bin"
@@ -33,7 +46,7 @@ jobs = {}
 
 def fetch_archive(url, wanted):
     """Download a .zip or .tar.xz and extract only the wanted file names into BIN."""
-    print(f"Downloading {url} ...")
+    log(f"Downloading {url.rsplit('/', 1)[-1]} ...")
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     data = urllib.request.urlopen(req).read()
     if url.endswith(".zip"):
@@ -65,12 +78,12 @@ def setup_tools():
             if FFMPEG_URL:
                 fetch_archive(FFMPEG_URL, {"ffmpeg" + EXE, "ffprobe" + EXE})
             else:
-                print("ffmpeg not found. Install it with: brew install ffmpeg")
+                log("ffmpeg not found. Install it with: brew install ffmpeg")
         if not have("deno"):
             fetch_archive(DENO_URL, {"deno" + EXE})
-        print("Tools ready.")
+        log("Tools ready.")
     except Exception as e:
-        print("Tool setup failed:", e)
+        log(f"Tool setup failed: {e}")
     ready.set()
 
 
@@ -86,10 +99,105 @@ def write_cookie_file(path, cookies):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def run_job(jid, url, mode, height, cookies=None):
+# kind -> (short text for the button, longer explanation for the tooltip / helper window)
+MESSAGES = {
+    "rate": ("429: wait 30-60 min", "YouTube is rate-limiting this IP (HTTP 429). Stop retrying, wait 30-60 minutes, then try once."),
+    "bot": ("Bot check: reload YouTube", "YouTube asked to confirm you are not a bot. Log in, reload the YouTube tab and the extension, then try once."),
+    "reload": ("Cookies expired: reload page", "YouTube rejected the login cookies. Reload the YouTube page and try again."),
+    "private": ("Private video", "This video is private. Log in with an account that can watch it, then reload the YouTube tab."),
+    "members": ("Members-only video", "This video is for channel members only."),
+    "age": ("Age-restricted: log in", "This video is age-restricted. Log in to YouTube in this browser and reload the tab."),
+    "region": ("Blocked in your country", "YouTube says this video is not available in your country."),
+    "unavailable": ("Video unavailable", "This video is unavailable (removed, deleted or blocked)."),
+    "live": ("Live stream: not supported", "Live streams and upcoming premieres can't be downloaded until they finish."),
+    "network": ("No internet connection", "Could not reach YouTube. Check your internet connection."),
+    "ffmpeg": ("ffmpeg missing", "ffmpeg/ffprobe not found. Delete helper/bin and run start.bat (or start.sh) again."),
+    "format": ("Quality not available", "The requested quality is not available for this video. Try another quality."),
+    "low": ("Only low quality offered", "YouTube only offered low quality for this video right now."),
+    "other": ("Failed - see helper window", "Download failed for an unknown reason. See the helper window."),
+}
+
+# (substrings are lower-case; first matching rule wins, so order matters)
+RULES = [
+    ("rate", ("429", "too many requests")),
+    ("bot", ("not a bot",)),
+    ("reload", ("needs to be reloaded",)),
+    ("private", ("private video",)),
+    ("members", ("members-only", "members only", "join this channel")),
+    ("age", ("confirm your age", "age-restricted", "age restricted")),
+    ("region", ("in your country", "geo restrict", "geo-restrict")),
+    ("live", ("live event", "is live", "premieres in", "this live")),
+    ("format", ("requested format is not available",)),
+    ("unavailable", ("video unavailable", "not available", "has been removed", "been terminated")),
+    ("network", ("getaddrinfo", "name resolution", "network is unreachable", "unable to connect",
+                 "timed out", "connection reset", "no route to host", "failed to resolve",
+                 "name or service not known")),
+    ("ffmpeg", ("ffmpeg", "ffprobe")),
+]
+ALWAYS_FATAL = {"rate", "network", "ffmpeg", "live"}          # trying another client won't help
+NEEDS_LOGIN = {"private", "members", "age", "region", "unavailable"}  # fatal only if cookies were already used
+UPDATABLE = {"other", "format"}                               # often fixed by a newer yt-dlp
+
+
+def classify(err):
+    t = str(err).lower()
+    for kind, needles in RULES:
+        if any(n in t for n in needles):
+            return kind
+    return "other"
+
+
+def short_err(e):
+    s = re.sub(r"^ERROR:\s*(\[[^\]]+\]\s*)?([\w-]{11}:\s*)?", "", str(e).strip())
+    return s.replace("\n", " ")[:160]
+
+
+class _Quiet:
+    """Silence yt-dlp's own output; the helper prints its own short status lines."""
+    def debug(self, m): pass
+    def info(self, m): pass
+    def warning(self, m): pass
+    def error(self, m): pass
+
+
+_update_lock = threading.Lock()
+_last_update = 0.0
+
+
+def update_ytdlp():
+    """Upgrade yt-dlp with pip and reload it. True only if a newer version was installed."""
+    global _last_update
+    with _update_lock:
+        if time.time() - _last_update < 3600:
+            log("yt-dlp was already checked in the last hour, not updating again.")
+            return False
+        _last_update = time.time()
+        try:
+            before = metadata.version("yt-dlp")
+            log(f"Updating yt-dlp (current {before}) ...")
+            r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", "yt-dlp[default]"],
+                               capture_output=True, text=True, timeout=240)
+            if r.returncode != 0:
+                log("Update failed: " + (r.stderr.strip().splitlines() or ["pip error"])[-1][:160])
+                return False
+            importlib.invalidate_caches()
+            for m in [m for m in sys.modules if m == "yt_dlp" or m.startswith(("yt_dlp.", "yt_dlp_ejs"))]:
+                del sys.modules[m]
+            after = metadata.version("yt-dlp")
+            if after == before:
+                log(f"yt-dlp is already the latest version ({after}).")
+                return False
+            log(f"yt-dlp updated {before} -> {after}.")
+            return True
+        except Exception as e:
+            log(f"Update failed: {e}")
+            return False
+
+
+def try_download(jid, url, mode, height, cookies):
+    """One full pass over all methods. Returns (True, None) or (False, error_kind)."""
     import yt_dlp
     job = jobs[jid]
-    ready.wait()
     seen = []
     expected = 2 if mode == "video" else 1
 
@@ -108,7 +216,8 @@ def run_job(jid, url, mode, height, cookies=None):
     opts = {
         "outtmpl": str(OUT / "%(title)s.%(ext)s"),
         "noplaylist": True,
-        "quiet": True,
+        "logger": _Quiet(),
+        "no_warnings": True,
         "progress_hooks": [hook],
     }
     if (BIN / ("ffmpeg" + EXE)).exists():
@@ -139,7 +248,7 @@ def run_job(jid, url, mode, height, cookies=None):
         sleep_interval_requests=1,
         concurrent_fragment_downloads=1,
     )
-    # Browser-like TLS fingerprint (needs curl_cffi, installed by start.bat)
+    # Browser-like TLS fingerprint (needs curl_cffi)
     try:
         import curl_cffi  # noqa: F401
         from yt_dlp.networking.impersonate import ImpersonateTarget
@@ -147,42 +256,28 @@ def run_job(jid, url, mode, height, cookies=None):
     except Exception:
         pass
 
-    # JS runtime for YouTube's challenge solving. Without it only a 360p format
-    # is exposed. Point yt-dlp straight at the bundled deno.
+    # JS runtime for YouTube's challenge solving. Without it only a 360p format is exposed.
     deno = shutil.which("deno")
     if deno:
         opts["js_runtimes"] = {"deno": {"path": deno}}
     opts["remote_components"] = ["ejs:github"]
 
-    def classify(err):
-        t = str(err)
-        if "429" in t or "Too Many Requests" in t:
-            return "rate"
-        if "not a bot" in t:
-            return "bot"
-        if "needs to be reloaded" in t:
-            return "reload"
-        return "other"
-
-    # Your account is in YouTube's SABR-only experiment: the default (web) clients
-    # then expose only 360p. So we try clients that do NOT use SABR first, and we
-    # check the real quality BEFORE downloading, moving on if it is too low.
-    #  1) android_vr, no cookies (no SABR, no PO token, up to 4K)
-    #  2) tv client with your cookies
-    #  3) tv_simply/web_safari with your cookies
-    #  4) default clients with your cookies (last resort, accepts any quality)
+    # Accounts in YouTube's SABR-only experiment get only 360p from the default clients,
+    # so we try other clients first and check the real quality BEFORE downloading.
+    #  1) android_vr, no cookies   2) tv + cookies   3) tv_simply/web_safari + cookies
+    #  4) default clients + cookies (last resort, accepts any quality)
     plans = [(False, ["android_vr"])]
     if cookies:
         plans += [(True, ["tv"]), (True, ["tv_simply", "web_safari"]), (True, None)]
     else:
         plans += [(False, None)]
     want = min(height, 720) if height else 720
-    errors = []
+    kinds = []
 
     for i, (use_cookies, clients) in enumerate(plans):
         last_plan = i == len(plans) - 1
         if i:
-            job.update(state="preparing", percent=0)
+            job.update(state="preparing", percent=0, note=f"Trying method {i + 1}/{len(plans)}…")
             time.sleep(3)
         o = dict(opts)
         if clients:
@@ -192,37 +287,54 @@ def run_job(jid, url, mode, height, cookies=None):
             cfile = HERE / f"cookies_{jid}.txt"
             write_cookie_file(cfile, cookies)
             o["cookiefile"] = str(cfile)
-        label = ("cookies" if use_cookies else "no cookies") + " / " + (",".join(clients) if clients else "default clients")
-        print(f"Attempt {i + 1}/{len(plans)}: {label}")
+        label = ",".join(clients) if clients else "default clients"
+        label += " (cookies)" if use_cookies else " (no cookies)"
+        log(f"Method {i + 1}/{len(plans)}: {label}")
         try:
             with yt_dlp.YoutubeDL(o) as ydl:
                 info = ydl.extract_info(url, download=False)
                 best = max((f.get("height") or 0 for f in info.get("formats", [])
                             if f.get("vcodec") not in (None, "none")), default=0)
-                print(f"  best video quality offered: {best}p")
                 if mode == "video" and best < want and not last_plan:
-                    errors.append("low")
+                    log(f"  only {best}p offered, trying next method")
+                    kinds.append("low")
                     continue
+                log(f"  {best}p offered, downloading")
                 ydl.process_video_result(info, download=True)
-            job.update(state="done", percent=100)
-            return
+            log(f"Saved: {info.get('title', url)}")
+            return True, None
         except Exception as e:
             kind = classify(e)
-            errors.append(kind)
-            print(f"Attempt failed ({kind}):", e)
+            kinds.append(kind)
+            log(f"  failed ({kind}): {short_err(e)}")
+            if kind in ALWAYS_FATAL or (kind in NEEDS_LOGIN and (use_cookies or not cookies)):
+                break
         finally:
             if cfile:
                 cfile.unlink(missing_ok=True)
 
-    if "rate" in errors or "bot" in errors:
-        msg = ("YouTube is blocking this IP/session (429 / bot check). Stop retrying, "
-               "wait 30-60 minutes, reload the YouTube tab (logged in), reload the extension, then try once.")
-    elif "reload" in errors:
-        msg = "YouTube rejected the login cookies. Reload the YouTube page, then try again."
-    else:
-        msg = "Download failed. Run start.bat (Windows) or start.sh (Linux) to update yt-dlp, then try again."
-    print("FAILED:", msg)
-    job.update(state="error", error=msg)
+    real = [k for k in kinds if k != "low"]
+    return False, (real[-1] if real else "low")
+
+
+def run_job(jid, url, mode, height, cookies=None):
+    job = jobs[jid]
+    ready.wait()
+    what = "MP3 128k" if mode == "audio" else (f"{height}p" if height else "best quality")
+    log(f"Request: {what} ({url.rsplit('=', 1)[-1]})")
+    ok, kind = try_download(jid, url, mode, height, cookies)
+    if not ok and kind in UPDATABLE:
+        job.update(state="preparing", percent=0, note="Updating yt-dlp…")
+        if update_ytdlp():
+            job.update(note="Retrying after update…")
+            log("Retrying once with the updated yt-dlp ...")
+            ok, kind = try_download(jid, url, mode, height, cookies)
+    if ok:
+        job.update(state="done", percent=100)
+        return
+    short, long = MESSAGES.get(kind, MESSAGES["other"])
+    log(f"FAILED ({kind}): {long}")
+    job.update(state="error", error=long, short=short)
 
 
 class H(BaseHTTPRequestHandler):
@@ -274,5 +386,5 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     threading.Thread(target=setup_tools, daemon=True).start()
-    print(f"Helper running on 127.0.0.1:{PORT}. Saving to {OUT}")
+    log(f"Helper running on 127.0.0.1:{PORT}. Saving to {OUT}")
     ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()
